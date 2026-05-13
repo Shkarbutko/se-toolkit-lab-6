@@ -51,3 +51,51 @@ def test_read_file_blocks_path_traversal(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError):
         agent.read_file("../secret.txt")
+
+def test_query_api_uses_env_and_api_key(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"ok": true}'
+
+    def fake_request(method, url, headers, json, timeout):
+        captured["method"] = method
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setenv("LMS_API_KEY", "test-lms-key")
+    monkeypatch.setenv("AGENT_API_BASE_URL", "http://example.com")
+    monkeypatch.setattr(agent.requests, "request", fake_request)
+
+    result = agent.query_api("get", "/items/")
+
+    assert captured["method"] == "GET"
+    assert captured["url"] == "http://example.com/items/"
+    assert captured["headers"] == {"X-API-Key": "test-lms-key"}
+    assert captured["json"] is None
+    assert captured["timeout"] == 15
+    assert '"status_code": 200' in result
+
+
+def test_query_api_parses_json_body(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 201
+        text = '{"created": true}'
+
+    def fake_request(method, url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setenv("LMS_API_KEY", "test-lms-key")
+    monkeypatch.setenv("AGENT_API_BASE_URL", "http://example.com")
+    monkeypatch.setattr(agent.requests, "request", fake_request)
+
+    agent.query_api("post", "/items/", '{"name": "Test"}')
+
+    assert captured["json"] == {"name": "Test"}

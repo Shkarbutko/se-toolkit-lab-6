@@ -61,3 +61,16 @@ The agent returns JSON with:
 - `answer`
 - `source`
 - `tool_calls`
+
+## System API Tool
+
+The agent also supports a `query_api` tool.
+
+This tool calls the deployed LMS API using:
+
+- `LMS_API_KEY`
+- `AGENT_API_BASE_URL`
+
+If `AGENT_API_BASE_URL` is not set, the default value is `http://localhost:42002`.
+
+The tool returns the HTTP status code and response body. It is used for live backend questions, database state, analytics endpoint behavior, and runtime debugging.

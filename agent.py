@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import requests
 from openai import OpenAI
 
 
@@ -54,12 +55,53 @@ def read_file(path: str) -> str:
     return file_path.read_text(encoding="utf-8")
 
 
+def query_api(method: str, path: str, body: str | None = None) -> str:
+    api_key = get_env("LMS_API_KEY")
+    base_url = os.environ.get("AGENT_API_BASE_URL", "http://localhost:42002").rstrip("/")
+
+    if not path.startswith("/"):
+        path = "/" + path
+
+    url = f"{base_url}{path}"
+
+    headers = {
+        "X-API-Key": api_key,
+    }
+
+    json_body = None
+    if body:
+        json_body = json.loads(body)
+
+    response = requests.request(
+        method=method.upper(),
+        url=url,
+        headers=headers,
+        json=json_body,
+        timeout=15,
+    )
+
+    return json.dumps(
+        {
+            "status_code": response.status_code,
+            "body": response.text,
+        },
+        ensure_ascii=False,
+    )
+
+
 def run_tool(name: str, arguments: dict[str, Any]) -> Any:
     if name == "list_files":
         return list_files()
 
     if name == "read_file":
         return read_file(arguments["path"])
+
+    if name == "query_api":
+        return query_api(
+            method=arguments["method"],
+            path=arguments["path"],
+            body=arguments.get("body"),
+        )
 
     raise ValueError(f"Unknown tool: {name}")
 
@@ -95,6 +137,38 @@ def get_tools() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_api",
+                "description": (
+                    "Call the deployed LMS backend API. "
+                    "Use this for live system data, item counts, HTTP status codes, "
+                    "analytics endpoints, and backend runtime behavior."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method, for example GET or POST.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                "API path, for example /items/ or "
+                                "/analytics/completion-rate?lab=lab-99."
+                            ),
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional JSON request body as a string.",
+                        },
+                    },
+                    "required": ["method", "path"],
+                },
+            },
+        },
     ]
 
 
@@ -109,9 +183,14 @@ def ask_llm(question: str) -> dict[str, Any]:
         {
             "role": "system",
             "content": (
-                "You are a documentation agent. "
-                "Use the available tools to inspect wiki documentation before answering. "
-                "Return a concise answer based on the documentation."
+                "You are a system agent for the LMS project. "
+                "Use read_file for wiki and source-code questions. "
+                "Use list_files when you need to discover available files or router modules. "
+                "Use query_api for live backend questions, database counts, HTTP status codes, "
+                "analytics endpoint behavior, and runtime errors. "
+                "For bug diagnosis, first call query_api to observe the error, then read_file "
+                "to inspect the relevant source code. "
+                "Always answer based on tool results, not guesses."
             ),
         },
         {
@@ -138,7 +217,7 @@ def ask_llm(question: str) -> dict[str, Any]:
 
             return {
                 "answer": answer,
-                "source": "wiki",
+                "source": "system",
                 "tool_calls": recorded_tool_calls,
             }
 
@@ -153,8 +232,9 @@ def ask_llm(question: str) -> dict[str, Any]:
 
             recorded_tool_calls.append(
                 {
-                    "name": tool_name,
-                    "arguments": arguments,
+                    "tool": tool_name,
+                    "args": arguments,
+                    "result": json.dumps(result, ensure_ascii=False),
                 }
             )
 
@@ -169,7 +249,7 @@ def ask_llm(question: str) -> dict[str, Any]:
 
     return {
         "answer": "The agent reached the maximum number of tool calls.",
-        "source": "wiki",
+        "source": "system",
         "tool_calls": recorded_tool_calls,
     }
 
