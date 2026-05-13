@@ -26,3 +26,28 @@ def test_get_env_raises_when_missing(monkeypatch):
 
     with pytest.raises(RuntimeError):
         get_env("MISSING_VAR")
+
+from pathlib import Path
+
+import agent
+
+
+def test_list_files_returns_wiki_files(tmp_path, monkeypatch):
+    wiki_dir = tmp_path / "wiki"
+    wiki_dir.mkdir()
+    file_path = wiki_dir / "example.md"
+    file_path.write_text("# Example", encoding="utf-8")
+
+    monkeypatch.setattr(agent, "WIKI_DIR", wiki_dir)
+
+    assert agent.list_files() == ["example.md"]
+
+
+def test_read_file_blocks_path_traversal(tmp_path, monkeypatch):
+    wiki_dir = tmp_path / "wiki"
+    wiki_dir.mkdir()
+
+    monkeypatch.setattr(agent, "WIKI_DIR", wiki_dir)
+
+    with pytest.raises(ValueError):
+        agent.read_file("../secret.txt")
