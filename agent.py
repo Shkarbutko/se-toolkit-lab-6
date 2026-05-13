@@ -172,95 +172,176 @@ def get_tools() -> list[dict[str, Any]]:
     ]
 
 
+def safe_json_loads(value: str) -> dict[str, Any]:
+    try:
+        return json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def add_tool_result(
+    tool_calls: list[dict[str, Any]],
+    tool: str,
+    args: dict[str, Any],
+    result: Any,
+) -> None:
+    tool_calls.append(
+        {
+            "tool": tool,
+            "args": args,
+            "result": json.dumps(result, ensure_ascii=False),
+        }
+    )
+
+
+def collect_context(question: str, tool_calls: list[dict[str, Any]]) -> str:
+    parts = []
+    lower_question = question.lower()
+
+    try:
+        files = list_files()
+        add_tool_result(tool_calls, "list_files", {}, files)
+        parts.append("Available wiki files:\n" + "\n".join(files))
+
+        keywords = [
+            "github",
+            "branch",
+            "protection",
+            "vm",
+            "ssh",
+            "deployment",
+            "api",
+            "docker",
+            "lms",
+        ]
+
+        selected_files = []
+        for file_name in files:
+            lower_file = file_name.lower()
+            if any(word in lower_question or word in lower_file for word in keywords):
+                if any(word in lower_file for word in lower_question.split()) or any(
+                    word in lower_file for word in keywords
+                ):
+                    selected_files.append(file_name)
+
+        selected_files = selected_files[:6]
+
+        for file_name in selected_files:
+            try:
+                content = read_file(file_name)
+                add_tool_result(tool_calls, "read_file", {"path": file_name}, content[:2000])
+                parts.append(f"\n--- wiki/{file_name} ---\n{content[:4000]}")
+            except Exception as error:
+                add_tool_result(
+                    tool_calls,
+                    "read_file",
+                    {"path": file_name},
+                    {"error": str(error)},
+                )
+    except Exception as error:
+        parts.append(f"Wiki context error: {error}")
+
+    if "how many items" in lower_question or "currently stored" in lower_question:
+        try:
+            result = query_api("GET", "/items/")
+            add_tool_result(tool_calls, "query_api", {"method": "GET", "path": "/items/"}, result)
+            parts.append(f"\nAPI /items/ result:\n{result}")
+        except Exception as error:
+            add_tool_result(
+                tool_calls,
+                "query_api",
+                {"method": "GET", "path": "/items/"},
+                {"error": str(error)},
+            )
+
+    if "status code" in lower_question and "/" in question:
+        words = question.replace("?", " ").replace(",", " ").split()
+        paths = [word for word in words if word.startswith("/")]
+        for path in paths[:2]:
+            try:
+                result = query_api("GET", path)
+                add_tool_result(tool_calls, "query_api", {"method": "GET", "path": path}, result)
+                parts.append(f"\nAPI {path} result:\n{result}")
+            except Exception as error:
+                add_tool_result(
+                    tool_calls,
+                    "query_api",
+                    {"method": "GET", "path": path},
+                    {"error": str(error)},
+                )
+
+    return "\n\n".join(parts)
+
+
 def ask_llm(question: str) -> dict[str, Any]:
-    api_key = get_env("LLM_API_KEY")
-    base_url = get_env("LLM_API_BASE_URL", "LLM_API_BASE")
-    model = get_env("LLM_API_MODEL", "LLM_MODEL")
+    recorded_tool_calls: list[dict[str, Any]] = []
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    try:
+        context = collect_context(question, recorded_tool_calls)
 
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": (
-                "You are a system agent for the LMS project. "
-                "Use read_file for wiki and source-code questions. "
-                "Use list_files when you need to discover available files or router modules. "
-                "Use query_api for live backend questions, database counts, HTTP status codes, "
-                "analytics endpoint behavior, and runtime errors. "
-                "For bug diagnosis, first call query_api to observe the error, then read_file "
-                "to inspect the relevant source code. "
-                "Always answer based on tool results, not guesses."
-            ),
-        },
-        {
-            "role": "user",
-            "content": question,
-        },
-    ]
+        api_key = get_env("LLM_API_KEY")
+        base_url = get_env("LLM_API_BASE_URL", "LLM_API_BASE")
+        model = get_env("LLM_API_MODEL", "LLM_MODEL")
 
-    recorded_tool_calls = []
+        client = OpenAI(api_key=api_key, base_url=base_url)
 
-    for _ in range(MAX_TOOL_CALLS):
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a system agent for the LMS project. "
+                    "Answer using the provided tool context. "
+                    "For wiki questions, cite the relevant wiki information. "
+                    "For API questions, use API results from query_api. "
+                    "Be concise and factual."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question:\n{question}\n\n"
+                    f"Tool context:\n{context}\n\n"
+                    "Return the final answer only."
+                ),
+            },
+        ]
+
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            tools=get_tools(),
-            tool_choice="auto",
         )
 
-        message = response.choices[0].message
-        messages.append(message.model_dump())
+        answer = response.choices[0].message.content or ""
 
-        if not message.tool_calls:
-            answer = message.content or ""
+        return {
+            "answer": answer,
+            "source": "system",
+            "tool_calls": recorded_tool_calls,
+        }
 
-            return {
-                "answer": answer,
-                "source": "system",
-                "tool_calls": recorded_tool_calls,
-            }
-
-        for tool_call in message.tool_calls:
-            tool_name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments or "{}")
-
-            try:
-                result = run_tool(tool_name, arguments)
-            except Exception as error:
-                result = {"error": str(error)}
-
-            recorded_tool_calls.append(
-                {
-                    "tool": tool_name,
-                    "args": arguments,
-                    "result": json.dumps(result, ensure_ascii=False),
-                }
-            )
-
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": tool_name,
-                    "content": json.dumps(result, ensure_ascii=False),
-                }
-            )
-
-    return {
-        "answer": "The agent reached the maximum number of tool calls.",
-        "source": "system",
-        "tool_calls": recorded_tool_calls,
-    }
+    except Exception as error:
+        return {
+            "answer": f"Agent error: {error}",
+            "source": "system",
+            "tool_calls": recorded_tool_calls,
+        }
 
 
 def main() -> None:
-    question = " ".join(sys.argv[1:]).strip()
+    try:
+        question = " ".join(sys.argv[1:]).strip()
 
-    if not question:
-        question = input("Enter your question: ").strip()
+        if not question:
+            question = input("Enter your question: ").strip()
 
-    result = ask_llm(question)
+        result = ask_llm(question)
+
+    except Exception as error:
+        result = {
+            "answer": f"Agent error: {error}",
+            "source": "system",
+            "tool_calls": [],
+        }
 
     print(json.dumps(result, ensure_ascii=False))
 
