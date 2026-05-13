@@ -27,3 +27,37 @@ Responsible for:
 ## Testing
 
 Regression tests are located in the `tests/` directory.
+
+## Documentation Tools
+
+The agent supports two tools for documentation access:
+
+### list_files
+
+Returns all available files inside the `wiki/` directory.
+
+### read_file
+
+Reads a file from the `wiki/` directory.
+
+Path traversal protection is implemented to prevent access outside the documentation directory.
+
+## Agentic Loop
+
+The agent uses an iterative tool-calling loop with a maximum of 10 tool calls.
+
+The workflow is:
+
+1. Receive a user question.
+2. Call the LLM.
+3. Execute requested tools.
+4. Append tool results to the conversation.
+5. Continue until the LLM returns a final answer.
+
+## Output Format
+
+The agent returns JSON with:
+
+- `answer`
+- `source`
+- `tool_calls`
